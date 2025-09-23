@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Variables de entorno para el servidor de imágenes
+export PORT=8000
+export IMGDIR=./images
+export MAX=10
+export THUMB_WIDTH=200
+export CACHE_TTL=5m
+
+# Ejecutar el servidor
+./bin/image-server
