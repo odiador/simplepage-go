@@ -1,5 +1,36 @@
 #!/bin/bash
 
+#
+# Go Image Server - Script de Build Multiplataforma
+# =================================================
+#
+# Este script automatiza el proceso de compilación del servidor de imágenes
+# para múltiples plataformas y arquitecturas. Genera binarios optimizados
+# y crea paquetes completos de despliegue listos para producción.
+#
+# Características:
+# - Compilación cruzada para Linux, Windows, macOS
+# - Optimización de binarios con ldflags para reducir tamaño
+# - Creación automática de paquetes de despliegue
+# - Scripts de ejecución personalizados por plataforma
+# - Documentación automática en cada paquete
+#
+# Uso:
+#   ./build.sh
+#
+# Requisitos:
+#   - Go 1.25 o superior instalado
+#   - Permisos de escritura en directorio bin/
+#
+# Salida:
+#   bin/
+#   ├── image-server-*           # Binarios por plataforma
+#   └── deploy-*/                # Paquetes completos de despliegue
+#
+# Autores: Juan Amador - Santiago Londoño
+# Curso: Computación en la nube 2025-2
+#
+
 # Colores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
