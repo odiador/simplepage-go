@@ -28,8 +28,6 @@ Thumbs.db
 # Logs
 *.log
 
-# Images directory if not committed
-images/
 
 # Build output
 bin/
