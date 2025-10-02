@@ -24,7 +24,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/odiador/go/internal/web"
+	"github.com/odiador/simplepage-go/internal/web"
 )
 
 // main es el punto de entrada de la aplicación.

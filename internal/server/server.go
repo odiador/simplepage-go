@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/odiador/go/internal/images"
-	"github.com/odiador/go/internal/templates"
+	"github.com/odiador/simplepage-go/internal/images"
+	"github.com/odiador/simplepage-go/internal/templates"
 )
 
 type Config struct {

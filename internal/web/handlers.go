@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/odiador/go/internal/images"
+	"github.com/odiador/simplepage-go/internal/images"
 )
 
 // PageData representa la estructura de datos que se pasa al template HTML.

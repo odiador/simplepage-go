@@ -1,3 +1,3 @@
-module github.com/odiador/go
+module github.com/odiador/simplepage-go
 
 go 1.25.1
