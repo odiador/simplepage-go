@@ -58,17 +58,20 @@ detect_vm_ip() {
   local max_attempts=5
   local attempt=1
   
+  # Extraer el prefijo de red (ej: de "192.168.56.102-254" obtener "192.168.56")
+  local network_prefix=$(echo "$network_range" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+  
   while [ $attempt -le $max_attempts ]; do
-    echo "   📡 Intento $attempt/$max_attempts: Escaneando rango DHCP con nmap ($network_range.102-254)..." >&2
+    echo "   📡 Intento $attempt/$max_attempts: Escaneando rango DHCP con nmap ($network_range)..." >&2
     
     # Escanear red y obtener todas las IPs activas
-    local nmap_output=$(nmap -sn "$network_range.102-254" 2>/dev/null)
+    local nmap_output=$(nmap -sn "$network_range" 2>/dev/null)
     
     # Extraer IPs del output usando grep con regex
     # Formato: "Nmap scan report for 192.168.56.114" o "Nmap scan report for 192.168.56.114 (192.168.56.114)"
     local all_ips=$(echo "$nmap_output" | \
       grep "Nmap scan report for" | \
-      grep -oE "$network_range\.[0-9]+" | \
+      grep -oE "$network_prefix\.[0-9]+" | \
       sort -u)
     
     if [[ -n "$all_ips" ]]; then
@@ -138,8 +141,8 @@ Opciones:
   --disk-path <ruta>        Ruta del disco VDI a montar (opcional)
   --vm-user <usuario>       Usuario SSH de la VM
   --vm-password <pass>      Contraseña sudo de la VM
-  --network-range <ip>      Rango de red (ej: 192.168.56)
-  --gateway <ip>            Gateway de la red (default: <network-range>.1)
+  --network-range <rango>   Rango de red completo (ej: 192.168.56.102-254)
+  --gateway <ip>            Gateway de la red (default: auto-detectado del rango)
   --backend-port <puerto>   Puerto del servicio backend (default: 8000)
   --balancer-host <ip>      IP del balanceador HAProxy
   --balancer-user <user>    Usuario SSH del balanceador
@@ -155,7 +158,7 @@ Ejemplo:
     --disk-path /home/discos/srvimg.vdi \\
     --vm-user debian \\
     --vm-password '1234' \\
-    --network-range 192.168.56 \\
+    --network-range 192.168.56.102-254 \\
     --backend-port 8000 \\
     --balancer-host 192.168.56.2 \\
     --balancer-user debian \\
@@ -213,9 +216,12 @@ if [[ -z "$BASE_VM" || -z "$VM_NAME" || -z "$VM_USER" || -z "$VM_PASS" ||
   show_help
 fi
 
+# Extraer el prefijo de red (ej: de "192.168.56.102-254" obtener "192.168.56")
+NETWORK_PREFIX=$(echo "$NETWORK_RANGE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+
 # Configurar gateway por defecto si no se especificó
 if [[ -z "$GATEWAY" ]]; then
-  GATEWAY="${NETWORK_RANGE}.1"
+  GATEWAY="${NETWORK_PREFIX}.1"
 fi
 
 # ============================================================
@@ -236,7 +242,7 @@ echo "   🖥️  AGREGANDO NUEVO SERVIDOR AL CLUSTER"
 echo "════════════════════════════════════════════════════════"
 echo "VM Base:      $BASE_VM"
 echo "Nueva VM:     $VM_NAME"
-echo "Red:          $NETWORK_RANGE.0/24"
+echo "Red:          $NETWORK_RANGE"
 echo "Gateway:      $GATEWAY"
 echo "Balanceador:  $BALANCER_HOST"
 echo "════════════════════════════════════════════════════════"
@@ -469,12 +475,16 @@ echo "🔗 [8/8] Agregando servidores al HAProxy en $BALANCER_HOST ..."
 
 # Escanear red para encontrar todos los servidores disponibles
 echo "   📡 Escaneando red para detectar servidores..."
-nmap_output=$(nmap -sn "$NETWORK_RANGE.102-254" 2>/dev/null)
+
+# Extraer el prefijo de red (ej: de "192.168.56.102-254" obtener "192.168.56")
+NETWORK_PREFIX=$(echo "$NETWORK_RANGE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+
+nmap_output=$(nmap -sn "$NETWORK_RANGE" 2>/dev/null)
 
 # Extraer todas las IPs activas
 all_server_ips=$(echo "$nmap_output" | \
   grep "Nmap scan report for" | \
-  grep -oE "$NETWORK_RANGE\.[0-9]+" | \
+  grep -oE "$NETWORK_PREFIX\.[0-9]+" | \
   sort -u)
 
 if [[ -z "$all_server_ips" ]]; then
