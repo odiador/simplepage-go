@@ -67,19 +67,11 @@ setup_balancer() {
   echo ""
   show_config
   
-  echo "💡 Tip: Usa la opción 6 del menú para editar la configuración"
+  echo "💡 Tip: Usa la opción 7 del menú para editar la configuración"
   echo ""
   
   # Preguntar si quiere escanear la red automáticamente
   read -p "¿Escanear red y agregar servidores automáticamente? (S/n): " scan_network
-  
-  echo ""
-  read -p "¿Continuar con estos parámetros? (S/n): " confirm
-  if [[ "$confirm" =~ ^[Nn]$ ]]; then
-    echo "Operación cancelada"
-    pause
-    return
-  fi
   
   echo ""
   echo "🚀 Ejecutando setup_balancer.sh..."
@@ -115,7 +107,7 @@ add_server() {
   echo ""
   show_config
   
-  echo "💡 Tip: Usa la opción 6 del menú para editar la configuración"
+  echo "💡 Tip: Usa la opción 7 del menú para editar la configuración"
   echo ""
   
   # Preguntar por el nombre de la VM (obligatorio)
@@ -126,14 +118,6 @@ add_server() {
       echo "❌ El nombre de la VM es obligatorio"
     fi
   done
-  
-  echo ""
-  read -p "¿Continuar con estos parámetros? (S/n): " confirm
-  if [[ "$confirm" =~ ^[Nn]$ ]]; then
-    echo "Operación cancelada"
-    pause
-    return
-  fi
   
   echo ""
   echo "🚀 Ejecutando add_server.sh..."
@@ -241,11 +225,11 @@ remove_server() {
   done
   
   echo ""
-  read -p "¿Mantener la VM pero removerla del HAProxy? (s/N): " keep_vm
-  
+  echo "⚠️  ADVERTENCIA: Esta operación eliminará la VM completamente"
+  echo "   y la removerá de la configuración de HAProxy."
   echo ""
-  read -p "¿Continuar con estos parámetros? (S/n): " confirm
-  if [[ "$confirm" =~ ^[Nn]$ ]]; then
+  read -p "¿Estás seguro de eliminar '$vm_name'? (s/N): " confirm
+  if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
     echo "Operación cancelada"
     pause
     return
@@ -256,11 +240,6 @@ remove_server() {
   echo "════════════════════════════════════════════════════════"
   echo ""
   
-  local keep_vm_flag=""
-  if [[ "$keep_vm" =~ ^[Ss]$ ]]; then
-    keep_vm_flag="--keep-vm"
-  fi
-  
   ./remove_server.sh \
     --vm-name "$vm_name" \
     --vm-user "$VM_USER" \
@@ -269,8 +248,7 @@ remove_server() {
     --backend-port "$BACKEND_PORT" \
     --balancer-host "$BALANCER_HOST" \
     --balancer-user "$BALANCER_USER" \
-    --balancer-pass "$BALANCER_PASSWORD" \
-    $keep_vm_flag
+    --balancer-pass "$BALANCER_PASSWORD"
   
   pause
 }
