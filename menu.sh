@@ -162,7 +162,73 @@ remove_server() {
   echo ""
   show_config
   
-  echo "💡 Tip: Usa la opción 6 del menú para editar la configuración"
+  # Verificar que nmap esté disponible
+  if ! command -v nmap &>/dev/null; then
+    echo "❌ ERROR: nmap no está instalado"
+    echo "   Instálalo con: sudo pacman -S nmap"
+    pause
+    return
+  fi
+  
+  echo "🔍 Escaneando red $NETWORK_RANGE para listar servidores actuales..."
+  echo ""
+  
+  # Extraer el prefijo de red
+  NETWORK_PREFIX=$(echo "$NETWORK_RANGE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+  
+  # Escanear red
+  nmap_output=$(nmap -sn "$NETWORK_RANGE" 2>/dev/null)
+  
+  # Extraer todas las IPs activas
+  all_ips=$(echo "$nmap_output" | \
+    grep "Nmap scan report for" | \
+    grep -oE "$NETWORK_PREFIX\.[0-9]+" | \
+    sort -u)
+  
+  if [[ -z "$all_ips" ]]; then
+    echo "⚠️  No se encontraron servidores activos en la red"
+    pause
+    return
+  fi
+  
+  # Convertir a array
+  ips_array=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && ips_array+=("$line")
+  done <<< "$all_ips"
+  
+  echo "📊 Servidores encontrados (${#ips_array[@]} host(s)):"
+  echo ""
+  
+  # Tabla de servidores
+  printf "%-18s %-20s %-10s\n" "IP" "HOSTNAME" "ESTADO"
+  printf "%-18s %-20s %-10s\n" "──────────────────" "────────────────────" "──────────"
+  
+  declare -a valid_hostnames
+  
+  for ip in "${ips_array[@]}"; do
+    # Intentar obtener hostname via SSH
+    hostname=$(sshpass -p "$VM_PASSWORD" ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o ConnectTimeout=2 \
+      -o BatchMode=no \
+      "${VM_USER}@${ip}" "hostname; echo" 2>/dev/null | tr -d '\r\n\t ')
+    
+    if [[ -n "$hostname" ]]; then
+      ssh_status="✅ OK"
+      valid_hostnames+=("$hostname")
+    else
+      hostname="(sin acceso SSH)"
+      ssh_status="❌"
+    fi
+    
+    printf "%-18s %-20s %-10s\n" "$ip" "$hostname" "$ssh_status"
+  done
+  
+  echo ""
+  echo "💡 Tip: Usa la opción 7 del menú para editar la configuración"
   echo ""
   
   # Preguntar por el nombre de la VM (obligatorio)
