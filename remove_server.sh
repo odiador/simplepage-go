@@ -23,12 +23,13 @@ sudo_remote() {
   sshpass -p "$password" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
     -o ConnectTimeout=30 \
     -o ServerAliveInterval=10 \
     -o ServerAliveCountMax=6 \
     -o Compression=yes \
     "${user}@${host}" \
-    "echo '$password' | sudo -S bash -c \"$command\""
+    "echo '$password' | sudo -S bash -c \"$command\"; echo"
 }
 
 # ============================================================
@@ -45,7 +46,7 @@ Opciones:
   --vm-name <nombre>        Nombre de la VM a eliminar
   --vm-user <usuario>       Usuario SSH de la VM
   --vm-password <pass>      Contraseña SSH de la VM
-  --network-range <ip>      Rango de red (ej: 192.168.56)
+  --network-range <rango>   Rango de red completo (ej: 192.168.56.102-254)
   --backend-port <puerto>   Puerto del servicio backend (default: 8080)
   --balancer-host <ip>      IP del balanceador HAProxy
   --balancer-user <user>    Usuario SSH del balanceador
@@ -59,7 +60,7 @@ Ejemplo 1 (eliminar VM y configuración):
     --vm-name servidor-10 \\
     --vm-user debian \\
     --vm-password '1234' \\
-    --network-range 192.168.56 \\
+    --network-range 192.168.56.102-254 \\
     --backend-port 8080 \\
     --balancer-host 192.168.56.2 \\
     --balancer-user debian \\
@@ -70,7 +71,7 @@ Ejemplo 2 (solo remover del HAProxy, mantener VM):
     --vm-name servidor-10 \\
     --vm-user debian \\
     --vm-password '1234' \\
-    --network-range 192.168.56 \\
+    --network-range 192.168.56.102-254 \\
     --balancer-host 192.168.56.2 \\
     --balancer-user debian \\
     --balancer-pass '1234' \\
@@ -151,13 +152,16 @@ if ! command -v nmap &>/dev/null; then
 fi
 
 # Escanear red
-echo "   📡 Escaneando red $NETWORK_RANGE.0/24 ..."
-nmap_output=$(nmap -sn "$NETWORK_RANGE.102-254" 2>/dev/null)
+echo "   📡 Escaneando red $NETWORK_RANGE ..."
+nmap_output=$(nmap -sn "$NETWORK_RANGE" 2>/dev/null)
+
+# Extraer el prefijo de red (ej: de "192.168.56.102-254" obtener "192.168.56")
+NETWORK_PREFIX=$(echo "$NETWORK_RANGE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 
 # Extraer todas las IPs activas
 all_ips=$(echo "$nmap_output" | \
   grep "Nmap scan report for" | \
-  grep -oE "$NETWORK_RANGE\.[0-9]+" | \
+  grep -oE "$NETWORK_PREFIX\.[0-9]+" | \
   sort -u)
 
 VM_IP=""
@@ -179,9 +183,10 @@ if [[ -n "$all_ips" ]]; then
     hostname=$(sshpass -p "$VM_PASS" ssh \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
       -o ConnectTimeout=3 \
       -o BatchMode=no \
-      "${VM_USER}@${ip}" "hostname" 2>/dev/null | tr -d '\r\n\t ')
+      "${VM_USER}@${ip}" "hostname; echo" 2>/dev/null | tr -d '\r\n\t ')
     
     if [[ "$hostname" == "$VM_NAME" ]]; then
       VM_IP="$ip"
@@ -262,175 +267,185 @@ echo "✅ Balanceador accesible"
 echo ""
 
 # ============================================================
-# Paso 5: Eliminar entrada del HAProxy usando hostname + IP + puerto
+# Paso 5: Regenerar configuración de HAProxy sin el servidor eliminado
 # ============================================================
-echo "🔧 [4/5] Eliminando '$VM_NAME' del HAProxy..."
+echo "🔧 [4/5] Regenerando configuración de HAProxy (excluyendo '$VM_NAME')..."
 
-if [[ -z "$VM_IP" ]]; then
-  echo "⚠️  No se detectó la IP de la VM"
-  echo "   Intentando eliminar solo por hostname..."
-  
-  # Verificar que la entrada existe
-  entry_count=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "grep -c 'server $VM_NAME' /etc/haproxy/haproxy.cfg || true")
-  
-  if [[ "$entry_count" -eq 0 ]]; then
-    echo "⚠️  El servidor '$VM_NAME' no está registrado en HAProxy"
-    echo "   No hay nada que eliminar de la configuración"
-  else
-    echo "   Encontradas $entry_count entrada(s), eliminando..."
-    
-    # Hacer backup de la configuración
-    echo "   Creando backup de configuración..."
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.\$(date +%Y%m%d_%H%M%S)"
-    
-    # Mostrar la línea antes de eliminar
-    echo "   📋 Contenido actual:"
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "grep 'server $VM_NAME' /etc/haproxy/haproxy.cfg"
-    
-    # Eliminar todas las líneas que contengan el servidor (formato: "    server nombre ...")
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "sed -i '/^    server $VM_NAME /d' /etc/haproxy/haproxy.cfg"
-    
-    if [ $? -ne 0 ]; then
-      echo "❌ ERROR: No se pudo actualizar la configuración de HAProxy"
-      exit 1
-    fi
-    
-    # Mostrar el archivo modificado
-    echo "   📄 Archivo después de eliminar:"
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "cat /etc/haproxy/haproxy.cfg"
-    echo ""
-    
-    echo "✅ Entrada eliminada de HAProxy"
-  fi
-else
-  echo "   Buscando entrada con hostname '$VM_NAME' e IP '$VM_IP:$BACKEND_PORT'..."
-  
-  # Verificar que la entrada existe con IP específica
-  entry_count=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "grep -c 'server $VM_NAME $VM_IP:$BACKEND_PORT' /etc/haproxy/haproxy.cfg || true")
-  
-  if [[ "$entry_count" -eq 0 ]]; then
-    echo "⚠️  El servidor '$VM_NAME $VM_IP:$BACKEND_PORT' no está registrado en HAProxy"
-    echo "   Intentando buscar solo por hostname..."
-    
-    entry_count=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "grep -c 'server $VM_NAME' /etc/haproxy/haproxy.cfg || true")
-    
-    if [[ "$entry_count" -eq 0 ]]; then
-      echo "⚠️  No se encontró ninguna entrada para '$VM_NAME'"
-    else
-      echo "   Encontradas $entry_count entrada(s) por hostname, eliminando..."
-      
-      # Hacer backup de la configuración
-      echo "   Creando backup de configuración..."
-      sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-        "cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.\$(date +%Y%m%d_%H%M%S)"
-      
-      # Mostrar la línea antes de eliminar
-      echo "   📋 Contenido actual:"
-      sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-        "grep 'server $VM_NAME' /etc/haproxy/haproxy.cfg"
-      
-      # Eliminar por hostname (formato: "    server nombre ...")
-      sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-        "sed -i '/^    server $VM_NAME /d' /etc/haproxy/haproxy.cfg"
-      
-      if [ $? -ne 0 ]; then
-        echo "❌ ERROR: No se pudo actualizar la configuración de HAProxy"
-        exit 1
-      fi
-      
-      # Mostrar el archivo modificado
-      echo "   📄 Archivo después de eliminar:"
-      sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-        "cat /etc/haproxy/haproxy.cfg"
-      echo ""
-      
-      echo "✅ Entrada eliminada de HAProxy"
-    fi
-  else
-    echo "   ✅ Encontrada entrada exacta: 'server $VM_NAME $VM_IP:$BACKEND_PORT'"
-    
-    # Hacer backup de la configuración
-    echo "   Creando backup de configuración..."
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.\$(date +%Y%m%d_%H%M%S)"
-    
-    # Mostrar la línea antes de eliminar
-    echo "   📋 Contenido actual:"
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "grep 'server $VM_NAME' /etc/haproxy/haproxy.cfg"
-    
-    # Eliminar la línea específica con IP (formato: "    server nombre ip:puerto check")
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "sed -i '/^    server $VM_NAME $VM_IP:$BACKEND_PORT check$/d' /etc/haproxy/haproxy.cfg"
-    
-    if [ $? -ne 0 ]; then
-      echo "❌ ERROR: No se pudo actualizar la configuración de HAProxy"
-      exit 1
-    fi
-    
-    # Mostrar el archivo modificado
-    echo "   📄 Archivo después de eliminar:"
-    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "cat /etc/haproxy/haproxy.cfg"
-    echo ""
-    
-    echo "✅ Entrada eliminada de HAProxy"
-  fi
+# Verificar que nmap esté disponible
+if ! command -v nmap &>/dev/null; then
+  echo "❌ ERROR: nmap no está instalado. Instálalo con: sudo pacman -S nmap"
+  exit 1
 fi
 
-# Continuar con validación solo si se eliminó algo
-entry_count=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-  "grep -c 'server $VM_NAME' /etc/haproxy/haproxy.cfg || true")
+# Escanear red para encontrar todos los servidores disponibles
+echo "   📡 Escaneando red para detectar servidores activos..."
 
-if [[ "$entry_count" -gt 0 ]]; then
-  echo "⚠️  Advertencia: Aún quedan $entry_count entrada(s) con '$VM_NAME' en HAProxy"
-else
-  # Validar configuración de HAProxy
-  echo "   Validando configuración..."
-  validation=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1")
+# Extraer el prefijo de red (ej: de "192.168.56.102-254" obtener "192.168.56")
+NETWORK_PREFIX=$(echo "$NETWORK_RANGE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+
+nmap_output=$(nmap -sn "$NETWORK_RANGE" 2>/dev/null)
+
+# Extraer todas las IPs activas
+all_server_ips=$(echo "$nmap_output" | \
+  grep "Nmap scan report for" | \
+  grep -oE "$NETWORK_PREFIX\.[0-9]+" | \
+  sort -u)
+
+# Convertir a array
+server_ips_array=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && server_ips_array+=("$line")
+done <<< "$all_server_ips"
+
+echo "   📋 Se encontraron ${#server_ips_array[@]} host(s) en el rango"
+echo ""
+
+# Recopilar información de todos los servidores válidos (excepto el que se está eliminando)
+declare -a valid_servers
+servers_found=0
+
+for ip in "${server_ips_array[@]}"; do
+  # Verificar SSH y obtener hostname
+  hostname=$(sshpass -p "$VM_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    -o ConnectTimeout=3 \
+    -o BatchMode=no \
+    "${VM_USER}@${ip}" "hostname; echo" 2>/dev/null | tr -d '\r\n\t ')
   
-  echo "   📋 Resultado de validación:"
+  if [[ -z "$hostname" ]]; then
+    continue
+  fi
+  
+  # Excluir el servidor que se está eliminando
+  if [[ "$hostname" == "$VM_NAME" ]]; then
+    echo "   🗑️  Excluyendo $hostname ($ip) de la nueva configuración"
+    continue
+  fi
+  
+  echo "   ✅ Manteniendo: $hostname ($ip)"
+  
+  # Agregar a la lista de servidores válidos
+  valid_servers+=("$hostname|$ip")
+  servers_found=$((servers_found + 1))
+done
+
+echo ""
+echo "   📊 Total de servidores en la nueva configuración: $servers_found"
+echo ""
+
+# Crear backup de la configuración actual
+echo "   💾 Creando backup de configuración..."
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.\$(date +%Y%m%d_%H%M%S)"
+
+# Regenerar la configuración completa de HAProxy
+echo "   ✍️  Regenerando configuración de HAProxy..."
+
+# Construir la nueva configuración
+new_config=$(cat <<'HAPROXY_CONFIG'
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+# Frontend - Puerto de entrada
+frontend http_front
+    bind *:80
+    stats uri /haproxy?stats
+    stats realm HAProxy\ Statistics
+    stats auth admin:admin
+    default_backend http_back
+
+#------------------------------------------------------------------------------
+# Backend - Servidores de aplicación
+#------------------------------------------------------------------------------
+backend http_back
+    balance random
+    option httpchk GET /
+HAPROXY_CONFIG
+)
+
+# Agregar todos los servidores encontrados (excepto el eliminado)
+for server_entry in "${valid_servers[@]}"; do
+  IFS='|' read -r hostname ip <<< "$server_entry"
+  new_config+=$'\n'"    server $hostname $ip:$BACKEND_PORT check"
+done
+
+# Escribir la nueva configuración
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "cat > /etc/haproxy/haproxy.cfg <<'EOF'
+$new_config
+EOF"
+
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: No se pudo escribir la configuración"
+  exit 1
+fi
+
+echo "   ✅ Configuración regenerada con $servers_found servidor(es)"
+echo ""
+
+# Validar la configuración
+echo "   🔍 Validando configuración de HAProxy..."
+validation=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1")
+
+if echo "$validation" | grep -qi "fatal.*error"; then
+  echo "❌ ERROR: Configuración inválida"
   echo "$validation"
   echo ""
-  
-  if echo "$validation" | grep -qi "fatal.*error"; then
-    echo "❌ ERROR: Configuración inválida - se encontraron errores fatales"
-    echo ""
-    echo "Restaurando backup..."
-    # Obtener el archivo de backup más reciente
-    latest_backup=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-      "ls -t /etc/haproxy/haproxy.cfg.backup.* 2>/dev/null | head -1")
-    if [[ -n "$latest_backup" ]]; then
-      sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-        "cp $latest_backup /etc/haproxy/haproxy.cfg"
-      echo "✅ Backup restaurado"
-    else
-      echo "⚠️  No se encontró backup reciente"
-    fi
-    exit 1
-  else
-    echo "✅ Configuración válida"
+  echo "   Restaurando backup..."
+  latest_backup=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+    "ls -t /etc/haproxy/haproxy.cfg.backup.* 2>/dev/null | head -1")
+  if [[ -n "$latest_backup" ]]; then
+    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+      "cp $latest_backup /etc/haproxy/haproxy.cfg"
+    echo "   ✅ Backup restaurado"
   fi
-  
-  # Recargar HAProxy
-  echo "🔄 Recargando HAProxy..."
-  sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "systemctl reload haproxy"
-  
-  if [ $? -ne 0 ]; then
-    echo "❌ ERROR: No se pudo recargar HAProxy"
-    exit 1
-  fi
-  echo "✅ HAProxy recargado correctamente"
+  exit 1
 fi
+
+echo "   ✅ Configuración válida"
+echo ""
+
+# Mostrar servidores configurados
+if [ $servers_found -gt 0 ]; then
+  echo "   📋 Servidores configurados:"
+  for server_entry in "${valid_servers[@]}"; do
+    IFS='|' read -r hostname ip <<< "$server_entry"
+    echo "      • $hostname ($ip:$BACKEND_PORT)"
+  done
+else
+  echo "   ⚠️  No quedan servidores en la configuración"
+fi
+echo ""
+
+# Recargar HAProxy
+echo "   🔄 Recargando HAProxy..."
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "systemctl reload haproxy"
+
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: Falló la recarga de HAProxy"
+  exit 1
+fi
+echo "   ✅ HAProxy recargado correctamente"
 echo ""
 
 # ============================================================
@@ -464,26 +479,26 @@ echo "   ✅ SERVIDOR ELIMINADO EXITOSAMENTE"
 echo "════════════════════════════════════════════════════════"
 echo ""
 echo "📋 Resumen:"
-echo "   • VM:          $VM_NAME"
+echo "   • VM eliminada:        $VM_NAME"
 if [[ -n "$VM_IP" ]]; then
-  echo "   • IP:          $VM_IP"
+  echo "   • IP anterior:         $VM_IP"
 fi
-echo "   • Puerto:      $BACKEND_PORT (especificado)"
 if ! $KEEP_VM; then
-  echo "   • VM eliminada de VirtualBox"
+  echo "   • VM eliminada de VirtualBox: ✅"
+else
+  echo "   • VM mantenida en VirtualBox: ✅"
 fi
-echo "   • Entrada removida de HAProxy"
-echo "   • Configuración actualizada y validada"
-echo ""
-echo "⚠️  NOTA: Si tu servidor usaba un puerto diferente a $BACKEND_PORT,"
-echo "   verifica manualmente el archivo de configuración:"
-echo "   ssh ${BALANCER_USER}@${BALANCER_HOST} 'cat /etc/haproxy/haproxy.cfg'"
+echo "   • Configuración regenerada: ✅"
+echo "   • Servidores restantes:     $servers_found"
 echo ""
 echo "🔍 Verificar estado del balanceador:"
 echo "   http://$BALANCER_HOST/haproxy?stats"
 echo ""
 echo "📁 Backups de configuración disponibles en:"
 echo "   $BALANCER_HOST:/etc/haproxy/haproxy.cfg.backup.*"
+echo ""
+echo "💡 Nota: La configuración se regeneró automáticamente"
+echo "   escaneando toda la red. No es necesaria validación manual."
 echo ""
 echo "════════════════════════════════════════════════════════"
 echo ""

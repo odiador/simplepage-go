@@ -10,8 +10,12 @@ sudo_remote() {
   local command="$4"
 
   # Usar sshpass para autenticación SSH + sudo
-  sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${user}@${host}" \
-    "echo '$password' | sudo -S bash -c \"$command\""
+  sshpass -p "$password" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    "${user}@${host}" \
+    "echo '$password' | sudo -S bash -c \"$command\" 2>&1" | sed 's/\[sudo\] password for [^:]*:/&\n/'
 }
 
 # ============================================================

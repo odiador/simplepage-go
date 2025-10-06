@@ -24,12 +24,13 @@ sudo_remote() {
   sshpass -p "$password" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
     -o ConnectTimeout=30 \
     -o ServerAliveInterval=10 \
     -o ServerAliveCountMax=6 \
     -o Compression=yes \
     "${user}@${host}" \
-    "echo '$password' | sudo -S bash -c \"$command\""
+    "echo '$password' | sudo -S bash -c \"$command\"; echo"
 }
 
 # ============================================================
@@ -93,9 +94,10 @@ detect_vm_ip() {
         local hostname=$(sshpass -p "$vm_pass" ssh \
           -o StrictHostKeyChecking=no \
           -o UserKnownHostsFile=/dev/null \
+          -o LogLevel=ERROR \
           -o ConnectTimeout=3 \
           -o BatchMode=no \
-          "${vm_user}@${ip}" "hostname" 2>/dev/null | tr -d '\r\n\t ')
+          "${vm_user}@${ip}" "hostname; echo" 2>/dev/null | tr -d '\r\n\t ')
         
         if [[ "$hostname" == "servidor1" ]]; then
           echo "✅ IP detectada: $ip (hostname: $hostname)" >&2
@@ -271,6 +273,29 @@ if VBoxManage showvminfo "$VM_NAME" &>/dev/null; then
   read -p "¿Deseas eliminarla y recrearla? (y/N): " recreate
   if [[ "$recreate" =~ ^[Yy]$ ]]; then
     echo "🗑️  Eliminando VM existente..."
+    
+    # Verificar si la VM está corriendo y apagarla
+    if VBoxManage showvminfo "$VM_NAME" | grep -q "State:.*running"; then
+      echo "   VM está corriendo, apagándola..."
+      
+      # Intentar apagado limpio primero
+      VBoxManage controlvm "$VM_NAME" acpipowerbutton 2>/dev/null || true
+      echo "   Esperando apagado limpio (10 segundos)..."
+      sleep 10
+      
+      # Si todavía está corriendo, forzar apagado
+      if VBoxManage showvminfo "$VM_NAME" | grep -q "State:.*running"; then
+        echo "   Forzando apagado..."
+        VBoxManage controlvm "$VM_NAME" poweroff
+        sleep 3
+      fi
+      
+      echo "   ✅ VM detenida"
+    else
+      echo "   VM ya está detenida"
+    fi
+    
+    # Ahora eliminar la VM
     VBoxManage unregistervm "$VM_NAME" --delete
     echo "✅ VM eliminada"
   else
@@ -382,9 +407,10 @@ while [ $ssh_attempt -le $max_ssh_attempts ]; do
   if sshpass -p "$VM_PASS" ssh \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
       -o ConnectTimeout=5 \
       -o BatchMode=no \
-      "${VM_USER}@${DETECTED_IP}" "echo 'SSH OK'" &>/dev/null; then
+      "${VM_USER}@${DETECTED_IP}" "echo 'SSH OK'; echo" &>/dev/null; then
     echo "✅ SSH disponible en $DETECTED_IP"
     break
   fi
@@ -469,9 +495,9 @@ fi
 echo ""
 
 # ============================================================
-# Paso 8: Agregar servidores al HAProxy
+# Paso 8: Regenerar configuración de servidores en HAProxy
 # ============================================================
-echo "🔗 [8/8] Agregando servidores al HAProxy en $BALANCER_HOST ..."
+echo "🔗 [8/8] Actualizando configuración de HAProxy en $BALANCER_HOST ..."
 
 # Escanear red para encontrar todos los servidores disponibles
 echo "   📡 Escaneando red para detectar servidores..."
@@ -502,9 +528,9 @@ echo "   📋 Se encontraron ${#server_ips_array[@]} host(s) en el rango DHCP"
 echo "   📝 IPs: ${server_ips_array[*]}"
 echo ""
 
-# Verificar cada IP y agregar al HAProxy
-servers_added=0
-servers_skipped=0
+# Recopilar información de todos los servidores válidos
+declare -a valid_servers
+servers_found=0
 
 for ip in "${server_ips_array[@]}"; do
   echo "   🔍 Procesando $ip..."
@@ -513,64 +539,139 @@ for ip in "${server_ips_array[@]}"; do
   hostname=$(sshpass -p "$VM_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
     -o ConnectTimeout=3 \
     -o BatchMode=no \
-    "${VM_USER}@${ip}" "hostname" 2>/dev/null | tr -d '\r\n\t ')
+    "${VM_USER}@${ip}" "hostname; echo" 2>/dev/null | tr -d '\r\n\t ')
   
   if [[ -z "$hostname" ]]; then
     echo "   ⏭️  Saltando $ip (sin acceso SSH)"
-    servers_skipped=$((servers_skipped + 1))
     continue
   fi
   
   echo "   ✅ Hostname detectado: $hostname"
   
-  # Verificar si ya existe en HAProxy
-  existing=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "grep -c 'server $hostname $ip:$BACKEND_PORT' /etc/haproxy/haproxy.cfg || true")
-  
-  if [[ "$existing" -gt 0 ]]; then
-    echo "   ℹ️  Servidor '$hostname' ya existe en HAProxy (saltando)"
-    servers_skipped=$((servers_skipped + 1))
-    continue
-  fi
-  
-  # Agregar al HAProxy
-  echo "   ➕ Agregando $hostname ($ip:$BACKEND_PORT) al HAProxy..."
-  sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "echo '    server $hostname $ip:$BACKEND_PORT check' >> /etc/haproxy/haproxy.cfg"
-  
-  if [ $? -eq 0 ]; then
-    echo "   ✅ Servidor '$hostname' agregado correctamente"
-    servers_added=$((servers_added + 1))
-  else
-    echo "   ❌ Error al agregar '$hostname'"
-  fi
-  echo ""
+  # Agregar a la lista de servidores válidos
+  valid_servers+=("$hostname|$ip")
+  servers_found=$((servers_found + 1))
 done
 
-echo "════════════════════════════════════════════════════════"
-echo "   📊 RESUMEN DE SERVIDORES"
-echo "════════════════════════════════════════════════════════"
-echo "   ✅ Agregados:  $servers_added"
-echo "   ⏭️  Saltados:   $servers_skipped"
-echo "════════════════════════════════════════════════════════"
+echo ""
+echo "   📊 Total de servidores válidos encontrados: $servers_found"
 echo ""
 
-if [ $servers_added -gt 0 ]; then
-  # Reiniciar HAProxy solo si se agregaron servidores
-  echo "🔄 Recargando HAProxy..."
-  sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-    "systemctl reload haproxy"
-  
-  if [ $? -ne 0 ]; then
-    echo "❌ ERROR: Falló la recarga de HAProxy"
-    exit 1
-  fi
-  echo "✅ HAProxy recargado correctamente"
-else
-  echo "ℹ️  No se agregaron servidores nuevos, no es necesario recargar HAProxy"
+if [ $servers_found -eq 0 ]; then
+  echo "⚠️  No se encontraron servidores válidos en la red"
+  exit 0
 fi
+
+# Crear backup de la configuración actual
+echo "   💾 Creando backup de configuración..."
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.backup.\$(date +%Y%m%d_%H%M%S)"
+
+# Regenerar la configuración completa de HAProxy
+echo "   ✍️  Regenerando configuración de HAProxy..."
+
+# Construir la nueva configuración
+new_config=$(cat <<'HAPROXY_CONFIG'
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+
+# Frontend - Puerto de entrada
+frontend http_front
+    bind *:80
+    stats uri /haproxy?stats
+    stats realm HAProxy\ Statistics
+    stats auth admin:admin
+    default_backend http_back
+
+#------------------------------------------------------------------------------
+# Backend - Servidores de aplicación
+#------------------------------------------------------------------------------
+backend http_back
+    balance random
+    option httpchk GET /
+HAPROXY_CONFIG
+)
+
+# Agregar todos los servidores encontrados
+for server_entry in "${valid_servers[@]}"; do
+  IFS='|' read -r hostname ip <<< "$server_entry"
+  new_config+=$'\n'"    server $hostname $ip:$BACKEND_PORT check"
+done
+
+# Escribir la nueva configuración
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "cat > /etc/haproxy/haproxy.cfg <<'EOF'
+$new_config
+EOF"
+
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: No se pudo escribir la configuración"
+  exit 1
+fi
+
+echo "   ✅ Configuración regenerada con $servers_found servidor(es)"
+echo ""
+
+# Validar la configuración
+echo "   � Validando configuración de HAProxy..."
+validation=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1")
+
+if echo "$validation" | grep -qi "fatal.*error"; then
+  echo "❌ ERROR: Configuración inválida"
+  echo "$validation"
+  echo ""
+  echo "   Restaurando backup..."
+  latest_backup=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+    "ls -t /etc/haproxy/haproxy.cfg.backup.* 2>/dev/null | head -1")
+  if [[ -n "$latest_backup" ]]; then
+    sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+      "cp $latest_backup /etc/haproxy/haproxy.cfg"
+    echo "   ✅ Backup restaurado"
+  fi
+  exit 1
+fi
+
+echo "   ✅ Configuración válida"
+echo ""
+
+# Mostrar servidores configurados
+echo "   📋 Servidores configurados:"
+for server_entry in "${valid_servers[@]}"; do
+  IFS='|' read -r hostname ip <<< "$server_entry"
+  echo "      • $hostname ($ip:$BACKEND_PORT)"
+done
+echo ""
+
+# Recargar HAProxy
+echo "   🔄 Recargando HAProxy..."
+sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
+  "systemctl reload haproxy"
+
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: Falló la recarga de HAProxy"
+  exit 1
+fi
+echo "   ✅ HAProxy recargado correctamente"
 echo ""
 
 # ============================================================
