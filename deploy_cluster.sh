@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ============================================================
-# Función para ejecutar comandos con sudo remoto usando expect
+# Función para ejecutar comandos con sudo remoto usando sshpass
 # ============================================================
 sudo_remote() {
   local host="$1"
@@ -9,15 +9,9 @@ sudo_remote() {
   local password="$3"
   local command="$4"
 
-  expect <<EOF
-set timeout -1
-log_user 0
-spawn ssh -o StrictHostKeyChecking=no ${user}@${host} "sudo -S bash -c '${command}'"
-expect {
-  "password" { send "${password}\r" }
-  eof
-}
-EOF
+  # Usar sshpass para autenticación SSH + sudo
+  sshpass -p "$password" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${user}@${host}" \
+    "echo '$password' | sudo -S bash -c \"$command\""
 }
 
 # ============================================================
@@ -37,12 +31,13 @@ show_help() {
   echo "  --pass-vm <password>      Contraseña sudo para las VMs"
   echo "  --pass-balancer <pass>    Contraseña sudo para el balanceador"
   echo "  --base-vm <nombre>        Nombre de la VM base a clonar"
+  echo "  --current-ip <ip>         IP actual de la plantilla base"
   echo
   echo "Ejemplo:"
   echo "  ./deploy_cluster.sh --from-ip 192.168.56.10 --to-ip 192.168.56.12 \\"
   echo "    --base-name web --base-vm template --disk-path /home/discos/srvimg.vdi \\"
   echo "    --balancer-host 192.168.56.5 --user juan --user-balancer juan \\"
-  echo "    --pass-vm '1234' --pass-balancer '1234'"
+  echo "    --pass-vm '1234' --pass-balancer '1234' --current-ip 192.168.56.3"
   exit 1
 }
 
@@ -61,13 +56,14 @@ while [[ $# -gt 0 ]]; do
     --pass-vm) pass_vm="$2"; shift 2;;
     --pass-balancer) pass_balancer="$2"; shift 2;;
     --base-vm) base_vm="$2"; shift 2;;
+    --current-ip) current_ip_base="$2"; shift 2;;
     *) echo "Opción desconocida: $1"; show_help ;;
   esac
 done
 
 if [[ -z "$from_ip" || -z "$to_ip" || -z "$base_name" || -z "$disk_path" || -z "$balancer_host" ||
-      -z "$user_vm" || -z "$user_balancer" || -z "$pass_vm" || -z "$pass_balancer" || -z "$base_vm" ]]; then
-  echo "❌ Faltan parámetros."
+      -z "$user_vm" || -z "$user_balancer" || -z "$pass_vm" || -z "$pass_balancer" || -z "$base_vm" || -z "$current_ip_base" ]]; then
+  echo "❌ Faltan parámetros obligatorios."
   show_help
 fi
 
@@ -81,50 +77,217 @@ from_int=$(ip_to_int "$from_ip")
 to_int=$(ip_to_int "$to_ip")
 
 # ============================================================
-# Crear y configurar las VMs
+# Crear y configurar las VMs (una por una, secuencialmente)
 # ============================================================
 for ((ip_int=from_int; ip_int<=to_int; ip_int++)); do
   ip=$(int_to_ip "$ip_int")
   vm_name="${base_name}-${ip##*.}"
 
+  echo ""
+  echo "════════════════════════════════════════════════"
+  echo "   Procesando VM: $vm_name (IP: $ip)"
+  echo "════════════════════════════════════════════════"
+
+  # ============================================================
+  # Paso 1: Verificar/Clonar VM
+  # ============================================================
   echo "🌀 Verificando existencia de VM $vm_name ..."
   if VBoxManage showvminfo "$vm_name" &>/dev/null; then
     echo "⚠️  VM $vm_name ya existe, omitiendo clonación."
   else
-    echo "🌀 Clonando VM $vm_name ..."
-    VBoxManage clonevm "$base_vm" --name "$vm_name" --register --mode all
+    echo "🌀 Clonando VM $vm_name desde $base_vm ..."
+    
+    # Verificar que la VM base existe antes de intentar clonar
+    if ! VBoxManage showvminfo "$base_vm" &>/dev/null; then
+      echo "❌ ERROR: La VM base '$base_vm' no existe."
+      echo ""
+      echo "VMs disponibles:"
+      VBoxManage list vms 2>&1
+      echo ""
+      exit 1
+    fi
+    
+    # Intentar clonar con reintentos
+    attempt=1
+    max_attempts=3
+    while true; do
+      echo "   Intento $attempt de clonar $vm_name..."
+      if VBoxManage clonevm "$base_vm" --name "$vm_name" --register --mode machine 2>&1; then
+        echo "✅ Clon de $base_vm creado como $vm_name"
+        break
+      else
+        if [ $attempt -ge $max_attempts ]; then
+          echo "❌ ERROR: Falló la clonación después de $max_attempts intentos."
+          exit 1
+        fi
+        echo "⚠️  Error al clonar $vm_name (intento $attempt/$max_attempts), reintentando en 5s..."
+        sleep 5
+        attempt=$((attempt + 1))
+      fi
+    done
   fi
 
-  echo "🔧 Configurando disco SATA 1 ..."
-  VBoxManage storageattach "$vm_name" --storagectl "SATA Controller" --port 1 --device 0 --type hdd --medium "$disk_path"
+  # ============================================================
+  # Paso 2: Configurar disco SATA 1
+  # ============================================================
+  echo "🔧 Añadiendo disco en SATA 1 ..."
+  if VBoxManage storageattach "$vm_name" --storagectl "SATA" --port 1 --device 0 --type hdd --medium "$disk_path" 2>&1; then
+    echo "✅ Disco añadido correctamente"
+  else
+    echo "⚠️  El disco ya podría estar conectado o hubo un error (continuando...)"
+  fi
 
-  echo "🌐 Configurando IP $ip ..."
-  sudo_remote "$ip" "$user_vm" "$pass_vm" "sed -i 's/address .*/address $ip/' /etc/network/interfaces && systemctl restart networking"
+  # ============================================================
+  # Paso 3: Iniciar la VM
+  # ============================================================
+  echo "🚀 Iniciando VM $vm_name ..."
+  if VBoxManage showvminfo "$vm_name" | grep -q "State:.*running"; then
+    echo "⚠️  VM ya está corriendo"
+  else
+    VBoxManage startvm "$vm_name" --type headless
+    echo "⏳ Esperando 15 segundos para que la VM inicie completamente..."
+    sleep 15
+  fi
 
-  echo "💻 Actualizando hostname y /etc/hosts ..."
-  sudo_remote "$ip" "$user_vm" "$pass_vm" "
-    hostnamectl set-hostname $vm_name
-    if grep -q '^127\\.0\\.1\\.1' /etc/hosts; then
-      sed -i 's/^127\\.0\\.1\\.1.*/127.0.1.1\t'"$vm_name"'/' /etc/hosts
-    else
-      echo -e '127.0.1.1\t'"$vm_name" >> /etc/hosts
-    fi
+  # ============================================================
+  # Paso 4: Usar la IP actual de la plantilla base
+  # ============================================================
+  current_ip="$current_ip_base"
+  echo "🔍 Usando IP de plantilla base: $current_ip"
+
+  # ============================================================
+  # Paso 5: Configurar IP y red (SIN reiniciar networking)
+  # ============================================================
+  echo "🌐 Configurando red con IP $ip ..."
+  sudo_remote "$current_ip" "$user_vm" "$pass_vm" "
+    cat > /etc/network/interfaces <<'NETEOF'
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+allow-hotplug enp0s3
+iface enp0s3 inet static
+    address $ip
+    netmask 255.255.255.0
+    gateway 192.168.56.1
+
+# This is an autoconfigured IPv6 interface
+iface enp0s3 inet6 auto
+NETEOF
+    echo \"✅ Archivo /etc/network/interfaces actualizado con IP $ip\"
   "
 
-  echo "🔁 Reiniciando VM $vm_name ..."
-  VBoxManage controlvm "$vm_name" reset
+  # ============================================================
+  # Paso 6: Configurar hostname y /etc/hosts (SIN reiniciar)
+  # ============================================================
+  echo "💻 Actualizando hostname y /etc/hosts ..."
+  sudo_remote "$current_ip" "$user_vm" "$pass_vm" "
+    # Configurar hostname del sistema
+    hostnamectl set-hostname $vm_name
+    echo \"✅ Hostname del sistema configurado: $vm_name\"
+    
+    # Actualizar /etc/hosts - reemplazar la línea 127.0.1.1
+    if grep -q '^127\\.0\\.1\\.1' /etc/hosts; then
+      # Si existe la línea 127.0.1.1, reemplazarla completamente
+      sed -i 's|^127\\.0\\.1\\.1.*|127.0.1.1\t$vm_name|' /etc/hosts
+      echo \"✅ Línea 127.0.1.1 actualizada en /etc/hosts\"
+    else
+      # Si no existe, agregarla después de 127.0.0.1
+      sed -i '/^127\\.0\\.0\\.1/a 127.0.1.1\t$vm_name' /etc/hosts
+      echo \"✅ Línea 127.0.1.1 agregada a /etc/hosts\"
+    fi
+    
+    echo \"✅ Configuración completada\"
+  "
 
-  echo "✅ VM $vm_name lista en IP $ip"
+  # ============================================================
+  # Paso 7: Reiniciar VM para aplicar nueva configuración de red
+  # ============================================================
+  echo "🔄 Reiniciando VM para aplicar nueva configuración de red..."
+  VBoxManage controlvm "$vm_name" acpipowerbutton
+  echo "⏳ Esperando que la VM se apague..."
+  sleep 10
+  
+  # Esperar a que se apague completamente
+  while VBoxManage showvminfo "$vm_name" | grep -q "State:.*running"; do
+    echo "   Esperando apagado..."
+    sleep 3
+  done
+  
+  echo "✅ VM apagada"
+  echo "🚀 Iniciando VM con nueva configuración..."
+  VBoxManage startvm "$vm_name" --type headless
+  
+  echo "⏳ Esperando que la VM inicie con la nueva IP ($ip)..."
+  sleep 20
+  
+  # Verificar conectividad con la nueva IP
+  max_ping_attempts=10
+  ping_attempt=1
+  while [ $ping_attempt -le $max_ping_attempts ]; do
+    if ping -c 1 -W 2 "$ip" &>/dev/null; then
+      echo "✅ VM responde en la nueva IP: $ip"
+      break
+    fi
+    echo "   Intento $ping_attempt/$max_ping_attempts - Esperando que $ip responda..."
+    sleep 3
+    ping_attempt=$((ping_attempt + 1))
+  done
+  
+  if [ $ping_attempt -gt $max_ping_attempts ]; then
+    echo "⚠️  La VM no responde en $ip después de $max_ping_attempts intentos"
+    echo "   Continuando de todas formas..."
+  fi
+
+  echo "✅ VM $vm_name configurada y lista en IP $ip"
+  echo ""
 done
 
 # ============================================================
 # Configurar balanceador HAProxy
 # ============================================================
-echo "⚙️ Configurando HAProxy en $balancer_host ..."
-sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "
-  apt-get update -y && apt-get install -y haproxy
-"
+echo ""
+echo "════════════════════════════════════════════════"
+echo "   Configurando Balanceador HAProxy"
+echo "════════════════════════════════════════════════"
+echo "🔍 Verificando conectividad del balanceador $balancer_host ..."
 
+# Verificar conectividad de red
+if ! ping -c 1 -W 2 "$balancer_host" &>/dev/null; then
+  echo "❌ ERROR: El balanceador $balancer_host no responde a ping"
+  exit 1
+fi
+echo "✅ Balanceador responde a ping"
+
+# Verificar conectividad a internet
+echo "🌐 Verificando conectividad a internet del balanceador..."
+if ! sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "ping -c 1 -W 3 8.8.8.8" &>/dev/null; then
+  echo "⚠️  ADVERTENCIA: El balanceador no tiene conectividad a internet"
+  echo "   No se podrá instalar HAProxy desde los repositorios"
+  read -p "¿Continuar de todas formas? (y/N): " continue_anyway
+  if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+    echo "❌ Abortando configuración de HAProxy"
+    exit 1
+  fi
+else
+  echo "✅ Balanceador tiene conectividad a internet"
+fi
+
+# Instalar HAProxy
+echo "📦 Instalando HAProxy en $balancer_host ..."
+if sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "apt-get update -y && apt-get install -y haproxy"; then
+  echo "✅ HAProxy instalado correctamente"
+else
+  echo "❌ ERROR: Falló la instalación de HAProxy"
+  echo "   Verifica la conectividad a internet y los repositorios de la VM"
+  exit 1
+fi
+
+# Configurar HAProxy
+echo "⚙️ Configurando archivo de HAProxy..."
 cfg="/etc/haproxy/haproxy.cfg"
 sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "
 cat > $cfg <<'EOCFG'
@@ -146,12 +309,36 @@ backend http_back
 EOCFG
 "
 
+if [ $? -ne 0 ]; then
+  echo "❌ ERROR: Falló la creación del archivo de configuración"
+  exit 1
+fi
+echo "✅ Configuración base creada"
+
+# Agregar servidores backend
+echo "📝 Agregando servidores backend..."
 for ((ip_int=from_int; ip_int<=to_int; ip_int++)); do
   ip=$(int_to_ip "$ip_int")
   vm_name="${base_name}-${ip##*.}"
+  echo "   Agregando: $vm_name ($ip:8000)"
   sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" \
-    "echo '    server ${vm_name} ${ip}:8000 check' | tee -a /etc/haproxy/haproxy.cfg"
+    "echo '    server ${vm_name} ${ip}:8000 check' >> /etc/haproxy/haproxy.cfg"
 done
+echo "✅ Servidores backend agregados"
 
-sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "systemctl restart haproxy"
-echo "✅ HAProxy listo en $balancer_host"
+# Reiniciar HAProxy
+echo "🔄 Reiniciando HAProxy..."
+if sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "systemctl restart haproxy && systemctl enable haproxy"; then
+  echo "✅ HAProxy reiniciado y habilitado"
+else
+  echo "❌ ERROR: Falló el reinicio de HAProxy"
+  exit 1
+fi
+
+# Verificar estado
+echo "🔍 Verificando estado de HAProxy..."
+sudo_remote "$balancer_host" "$user_balancer" "$pass_balancer" "systemctl status haproxy --no-pager | head -10"
+
+echo ""
+echo "✅ HAProxy configurado correctamente en $balancer_host"
+echo "   Accede al balanceador en: http://$balancer_host"
