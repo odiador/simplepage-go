@@ -7,17 +7,19 @@
 set -e
 
 # ============================================================
-# Variables de configuración (exportadas)
+# Importar configuración centralizada
 # ============================================================
-export BASE_VM="plantilla"
-export DISK_PATH="/home/amador/VirtualBox VMs/plantilla-servicio/servicioimg.vdi"
-export VM_USER="debian"
-export VM_PASSWORD="debian"
-export NETWORK_RANGE="192.168.56.102-254"
-export BACKEND_PORT="8080"
-export BALANCER_HOST="192.168.56.101"
-export BALANCER_USER="debian"
-export BALANCER_PASSWORD="debian"
+if [ -f "../quick_config.sh" ]; then
+    source ../quick_config.sh
+else
+    echo "❌ ERROR: ../quick_config.sh no encontrado"
+    exit 1
+fi
+
+# ============================================================
+# Variables específicas del script (si no están en config)
+# ============================================================
+# (Todas las variables ahora vienen de quick_config.sh)
 
 # ============================================================
 # Banner
@@ -57,7 +59,7 @@ echo ""
 echo "🚀 Agregando servidor '$VM_NAME'..."
 echo ""
 
-./add_server.sh \
+../deploy/add_server.sh \
   --base-vm "$BASE_VM" \
   --vm-name "$VM_NAME" \
   --disk-path "$DISK_PATH" \

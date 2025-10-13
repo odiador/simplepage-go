@@ -20,6 +20,10 @@ sudo_remote() {
   local password="$3"
   local command="$4"
 
+  # Debug: Verificar que la contraseña se está pasando
+  echo "🔍 DEBUG: Password length: ${#password}" >&2
+  echo "🔍 DEBUG: Password first char: ${password:0:1}" >&2
+  
   sshpass -p "$password" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
@@ -29,7 +33,7 @@ sudo_remote() {
     -o ServerAliveCountMax=6 \
     -o Compression=yes \
     "${user}@${host}" \
-    "echo '$password' | sudo -S bash -c \"$command\" 2>&1" | sed 's/\[sudo\] password for [^:]*:/&\n/'
+    "echo \"$password\" | sudo -S bash -c \"$command\" 2>&1" | sed 's/\[sudo\] password for [^:]*:/&\n/'
 }
 
 # ============================================================
@@ -162,12 +166,7 @@ if ! sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
     "ping -c 2 -W 5 8.8.8.8" &>/dev/null; then
   echo "⚠️  ADVERTENCIA: El balanceador no tiene conectividad a internet"
   echo "   Para instalar HAProxy necesitas configurar la red correctamente."
-  echo ""
-  read -p "¿Deseas continuar de todas formas? (y/N): " continue_anyway
-  if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
-    echo "❌ Instalación cancelada por el usuario"
-    exit 1
-  fi
+  echo "   Continuando de todas formas..."
 else
   echo "✅ Conectividad a internet verificada"
 fi
@@ -180,7 +179,7 @@ echo "📦 [4/5] Instalando HAProxy..."
 echo ""
 
 install_output=$(sudo_remote "$BALANCER_HOST" "$BALANCER_USER" "$BALANCER_PASS" \
-  "apt-get update -qq && apt-get install -y haproxy" 2>&1)
+  "apt-get update -qq && apt-get install -y haproxy sysstat stress-ng" 2>&1)
 
 if [ $? -ne 0 ]; then
   echo "❌ ERROR: Falló la instalación de HAProxy"

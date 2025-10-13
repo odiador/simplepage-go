@@ -6,27 +6,34 @@
 #############################################
 
 # ============================================================
-# Configuración de Auto-Scaling
+# Importar configuración centralizada (valores por defecto)
 # ============================================================
-UMBRAL_ALTO=75
-UMBRAL_CRITICO=85
-UMBRAL_BAJO=40
-UMBRAL_MUY_BAJO=25
-INTERVALO_MONITOREO=20
-MIN_SERVIDORES=2
-MAX_SERVIDORES=5
-TIEMPO_COOLDOWN=60
+if [ -f "./quick_config.sh" ]; then
+    source ./quick_config.sh
+fi
 
 # ============================================================
-# Configuración de Infraestructura
+# Configuración de Auto-Scaling (pueden ser sobreescritos por argumentos)
 # ============================================================
-BALANCER_HOST="192.168.56.101"
-BALANCER_USER="debian"
-BALANCER_PASSWORD="debian"
-VM_USER="debian"
-VM_PASSWORD="debian"
-NETWORK_RANGE="192.168.56.102-254"
-BACKEND_PORT="8080"
+UMBRAL_ALTO=${UMBRAL_ALTO:-75}
+UMBRAL_CRITICO=${UMBRAL_CRITICO:-85}
+UMBRAL_BAJO=${UMBRAL_BAJO:-40}
+UMBRAL_MUY_BAJO=${UMBRAL_MUY_BAJO:-25}
+INTERVALO_MONITOREO=${INTERVALO_MONITOREO:-20}
+MIN_SERVIDORES=${MIN_SERVIDORES:-2}
+MAX_SERVIDORES=${MAX_SERVIDORES:-5}
+TIEMPO_COOLDOWN=${TIEMPO_COOLDOWN:-60}
+
+# ============================================================
+# Configuración de Infraestructura (pueden ser sobreescritos por argumentos)
+# ============================================================
+BALANCER_HOST=${BALANCER_HOST:-"192.168.56.101"}
+BALANCER_USER=${BALANCER_USER:-"debian"}
+BALANCER_PASSWORD=${BALANCER_PASSWORD:-"debian"}
+VM_USER=${VM_USER:-"debian"}
+VM_PASSWORD=${VM_PASSWORD:-"debian"}
+NETWORK_RANGE=${NETWORK_RANGE:-"192.168.56.102-254"}
+BACKEND_PORT=${BACKEND_PORT:-"8080"}
 
 # ============================================================
 # Configuración de Prueba Automática (Opcional)
@@ -38,10 +45,10 @@ TIEMPO_INICIO=$(date +%s)
 # ============================================================
 # Archivos y Scripts
 # ============================================================
-LOG_FILE="./autoscaler.log"
+LOG_FILE="../../autoscaler.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_AGREGAR="$SCRIPT_DIR/quick_add_server.sh"
-SCRIPT_ELIMINAR="$SCRIPT_DIR/quick_remove_server.sh"
+SCRIPT_AGREGAR="$SCRIPT_DIR/../balancer/quick_add_server.sh"
+SCRIPT_ELIMINAR="$SCRIPT_DIR/../balancer/quick_remove_server.sh"
 ESTADO_FILE="/tmp/autoscaler_state"
 COOLDOWN_FILE="/tmp/autoscaler_cooldown"
 
@@ -535,6 +542,7 @@ remove_server() {
     if "$SCRIPT_ELIMINAR" "$vm_to_remove" 2>&1 | while IFS= read -r line; do
         # Mostrar en rojo con prefijo [REMOVE]
         echo -e "\033[0;31m[REMOVE]\033[0m $line" | tee -a "$LOG_FILE"
+        
     done; then
         log_message ""
         log_message "✅ quick_remove_server.sh ejecutado exitosamente - VM eliminada: $vm_to_remove"
@@ -778,6 +786,39 @@ main() {
     if ! validate_balancer_connection; then
         exit 1
     fi
+    
+    # Setup automático del balanceador
+    log_message ""
+    log_message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_message "   SETUP AUTOMÁTICO DEL BALANCEADOR"
+    log_message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_message ""
+    
+    if [ -x "../balancer/quick_setup_balancer.sh" ]; then
+        log_message "🔧 Ejecutando setup automático del balanceador..."
+        
+        # Ejecutar y mostrar salida en tiempo real con prefijo [BALANCER]
+        "../balancer/quick_setup_balancer.sh" 2>&1 | while IFS= read -r line; do
+            echo -e "\033[0;35m[BALANCER]\033[0m $line" | tee -a "$LOG_FILE"
+        done
+        
+        # Capturar código de salida
+        local exit_code=${PIPESTATUS[0]}
+        
+        if [ $exit_code -eq 0 ]; then
+            log_message "✅ Setup del balanceador completado"
+        else
+            log_message "⚠️  El setup del balanceador falló (código: $exit_code), pero continuando..."
+        fi
+    else
+        log_message "⚠️  Script ../balancer/auto_setup_balancer.sh no encontrado, omitiendo setup automático"
+    fi
+    
+    log_message ""
+    log_message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_message "   TEST INICIAL DEL SISTEMA"
+    log_message "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_message ""
     
     # Test inicial de CPU del balanceador
     log_message "🔍 Test inicial de CPU del balanceador..."

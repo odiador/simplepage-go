@@ -7,15 +7,19 @@
 set -e
 
 # ============================================================
-# Variables de configuración (exportadas)
+# Importar configuración centralizada
 # ============================================================
-export VM_USER="debian"
-export VM_PASSWORD="debian"
-export NETWORK_RANGE="192.168.56.102-254"
-export BACKEND_PORT="8080"
-export BALANCER_HOST="192.168.56.101"
-export BALANCER_USER="debian"
-export BALANCER_PASSWORD="debian"
+if [ -f "../quick_config.sh" ]; then
+    source ../quick_config.sh
+else
+    echo "❌ ERROR: ../quick_config.sh no encontrado"
+    exit 1
+fi
+
+# ============================================================
+# Variables específicas del script (si no están en config)
+# ============================================================
+# (Todas las variables ahora vienen de quick_config.sh)
 
 # ============================================================
 # Banner
@@ -131,7 +135,7 @@ echo ""
 echo "🚀 Eliminando servidor '$VM_NAME'..."
 echo ""
 
-./remove_server.sh \
+../deploy/remove_server.sh \
   --vm-name "$VM_NAME" \
   --vm-user "$VM_USER" \
   --vm-password "$VM_PASSWORD" \
