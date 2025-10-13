@@ -94,6 +94,8 @@ echo ""
 # ============================================================
 # Solicitar nombre de la VM a eliminar
 # ============================================================
+AUTO_MODE=false
+
 if [[ -z "$1" ]]; then
   read -p "Nombre de la VM a eliminar: " VM_NAME
   if [[ -z "$VM_NAME" ]]; then
@@ -102,17 +104,24 @@ if [[ -z "$1" ]]; then
   fi
 else
   VM_NAME="$1"
+  AUTO_MODE=true  # Si se pasa como argumento, modo automático (sin confirmación)
 fi
 
-echo ""
-echo "⚠️  ADVERTENCIA: Esta operación eliminará la VM completamente"
-echo "   y la removerá de la configuración de HAProxy."
-echo ""
-read -p "¿Estás seguro de eliminar '$VM_NAME'? (s/N): " confirm
+# Solo pedir confirmación si NO está en modo automático
+if [ "$AUTO_MODE" = false ]; then
+  echo ""
+  echo "⚠️  ADVERTENCIA: Esta operación eliminará la VM completamente"
+  echo "   y la removerá de la configuración de HAProxy."
+  echo ""
+  read -p "¿Estás seguro de eliminar '$VM_NAME'? (s/N): " confirm
 
-if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
-  echo "Operación cancelada"
-  exit 0
+  if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
+    echo "Operación cancelada"
+    exit 0
+  fi
+else
+  echo ""
+  echo "🤖 Eliminando '$VM_NAME'..."
 fi
 
 # ============================================================

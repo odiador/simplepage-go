@@ -152,6 +152,36 @@ ls -la images/
 cat internal/templates/index.html
 ```
 
+## 🤖 Auto-Scaler (Nuevo)
+
+Sistema de escalado automático que monitorea la CPU del balanceador HAProxy y ajusta dinámicamente el número de servidores backend según la carga.
+
+### Inicio Rápido del Auto-Scaler
+
+```bash
+# Validar configuración y ejecutar
+./start_autoscaler.sh
+
+# O ejecutar directamente
+./autoscaler.sh
+
+# Modo prueba con carga artificial
+./autoscaler.sh --modo-prueba
+```
+
+### Características del Auto-Scaler
+
+- ✅ **Monitoreo en tiempo real** - Supervisa CPU del balanceador cada 20 segundos
+- ✅ **Escalado inteligente** - Agrega/elimina servidores según umbrales configurables
+- ✅ **Protección por cooldown** - Evita cambios frecuentes entre acciones
+- ✅ **Límites configurables** - Define mínimo y máximo de servidores
+- ✅ **Modo de prueba** - Genera carga artificial para validar funcionamiento
+- ✅ **Logging completo** - Registra todas las acciones en `autoscaler.log`
+
+### Documentación Completa
+
+Consulta [AUTOSCALER.md](AUTOSCALER.md) para documentación detallada del auto-scaler.
+
 ## 📚 Documentación Técnica
 
 - Cada archivo incluye documentación detallada de funciones y estructuras
